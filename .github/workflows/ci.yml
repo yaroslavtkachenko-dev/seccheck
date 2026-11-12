@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Syntax
+        run: zsh -n seccheck
+
+      - name: Tests
+        run: zsh tests/run.zsh
+
+      # A hosted runner has no VPN, no FileVault and no backups, so the report
+      # is full of problems by design. This step only shows that a real run
+      # completes; the exit code is not a verdict here.
+      - name: Smoke run
+        run: ./seccheck --no-net || true
+        env:
+          SECCHECK_LANG: en

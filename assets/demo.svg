@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 612" width="800" height="612" role="img" aria-label="Example seccheck report: network, open ports, device and backups, with two problems found">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 13px; fill: #e6edf3; }
+    .h { font-weight: 700; fill: #ffffff; }
+    .ok { fill: #3fb950; }
+    .bad { fill: #f85149; }
+    .dim { fill: #8b949e; }
+  </style>
+  <rect width="800" height="612" rx="10" fill="#0d1117"/>
+  <rect width="800" height="36" rx="10" fill="#161b22"/>
+  <rect y="26" width="800" height="10" fill="#161b22"/>
+  <circle cx="20" cy="18" r="6" fill="#f85149"/>
+  <circle cx="40" cy="18" r="6" fill="#d29922"/>
+  <circle cx="60" cy="18" r="6" fill="#3fb950"/>
+
+  <text x="24" y="66"><tspan class="dim">$</tspan> seccheck</text>
+
+  <text x="40" y="104" class="h">NETWORK</text>
+  <text y="123"><tspan x="40" class="ok">✓</tspan><tspan x="66">Route</tspan><tspan x="210">utun4 — all traffic goes through the tunnel</tspan></text>
+  <text y="142"><tspan x="40" class="ok">✓</tspan><tspan x="66">Uplink</tspan><tspan x="210">en0 — 192.168.1.24</tspan></text>
+  <text y="161"><tspan x="40" class="ok">✓</tspan><tspan x="66">DNS</tspan><tspan x="210">100.64.0.2 via utun4</tspan></text>
+  <text y="180"><tspan x="40" class="ok">✓</tspan><tspan x="66">IPv6</tspan><tspan x="210">no route — nothing to leak</tspan></text>
+  <text y="199"><tspan x="40" class="ok">✓</tspan><tspan x="66">Exit point</tspan><tspan x="210">Amsterdam, NL — AS64500 Example Hosting · block owner ExampleVPN</tspan></text>
+  <text y="218"><tspan x="40" class="ok">✓</tspan><tspan x="66">LAN gateway</tspan><tspan x="210">192.168.1.1 unreachable — LAN is cut off</tspan></text>
+
+  <text x="40" y="256" class="h">OPEN PORTS</text>
+  <text y="275"><tspan x="40" class="ok">✓</tspan><tspan x="66">5000/tcp</tspan><tspan x="210">ControlCenter — allowlisted</tspan></text>
+  <text y="294"><tspan x="40" class="ok">✓</tspan><tspan x="66">7000/tcp</tspan><tspan x="210">ControlCenter — allowlisted</tspan></text>
+  <text y="313"><tspan x="40" class="bad">✗</tspan><tspan x="66">8000/tcp</tspan><tspan x="210">Python — NOT ALLOWLISTED, reachable from the network</tspan></text>
+
+  <text x="40" y="351" class="h">DEVICE</text>
+  <text y="370"><tspan x="40" class="ok">✓</tspan><tspan x="66">FileVault</tspan><tspan x="210">on</tspan></text>
+  <text y="389"><tspan x="40" class="ok">✓</tspan><tspan x="66">SIP</tspan><tspan x="210">on</tspan></text>
+  <text y="408"><tspan x="40" class="ok">✓</tspan><tspan x="66">Gatekeeper</tspan><tspan x="210">on</tspan></text>
+  <text y="427"><tspan x="40" class="ok">✓</tspan><tspan x="66">Firewall</tspan><tspan x="210">on</tspan></text>
+  <text y="446"><tspan x="40" class="ok">✓</tspan><tspan x="66">Stealth mode</tspan><tspan x="210">on</tspan></text>
+  <text y="465"><tspan x="40" class="ok">✓</tspan><tspan x="66">Disk space</tspan><tspan x="210">61% used, 190 GB free</tspan></text>
+
+  <text x="40" y="503" class="h">BACKUPS</text>
+  <text y="522"><tspan x="40" class="bad">✗</tspan><tspan x="66">Backup Drive</tspan><tspan x="210">NOT encrypted</tspan></text>
+
+  <text x="40" y="560"><tspan class="bad">Problems: 2</tspan>, warnings: 0</text>
+  <text x="40" y="579" class="dim">2026-11-11 20:10</text>
+</svg>

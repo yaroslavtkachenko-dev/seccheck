@@ -1,0 +1,8 @@
+# Personal runtime files. They hold exit addresses and backup drive names and
+# must never be committed. Current versions keep them in the home directory;
+# these patterns cover leftovers from versions that kept them next to the script.
+seccheck.log
+.seccheck.state
+seccheck.conf
+
+.DS_Store

@@ -1,0 +1,669 @@
+#!/bin/zsh
+# seccheck — macOS security posture in one command: VPN tunnel, leaks, open
+# ports, device settings, backups. No sudo, no dependencies.
+# Exit code: 0 clean · 1 warnings · 2 problems.
+# https://github.com/yaroslavtkachenko-dev/seccheck
+
+emulate -L zsh
+setopt pipefail
+
+VERSION=1.0.0
+
+# In a non-interactive shell (launchd, cron) the locale is empty, and then
+# ${#str} counts bytes instead of characters, so non-ASCII labels break the
+# column alignment.
+if [[ $LC_ALL != *UTF-8* && $LANG != *UTF-8* && $LC_CTYPE != *UTF-8* ]]; then
+  if locale -a 2>/dev/null | grep -qx en_US.UTF-8; then export LC_ALL=en_US.UTF-8
+  else export LC_ALL=C.UTF-8; fi
+fi
+setopt multibyte
+
+# $0 inside a zsh function is the function name, not the script path, so the
+# path is captured here at the top level. :a leaves symlinks unresolved on
+# purpose: a Homebrew bin path survives upgrades, the Cellar path behind it
+# does not, and this path ends up in the launchd plist.
+SELF=${0:a}
+
+# Nothing is stored next to the script: it may live in a read-only or
+# versioned directory.
+CONF=${SECCHECK_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/seccheck/seccheck.conf}
+STATE_FILE=${SECCHECK_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/seccheck/state}
+LOG=${SECCHECK_LOG:-$HOME/Library/Logs/seccheck.log}
+
+# The agent appends to the log on every run. Truncate in place (same inode)
+# rather than via mv: launchd keeps its descriptor open and would go on
+# writing into a detached file, and the log would silently stop growing.
+if [[ -f $LOG ]] && (( $(stat -f %z $LOG 2>/dev/null || print 0) > 524288 )); then
+  KEEP=$(tail -n 200 $LOG 2>/dev/null); print -r -- $KEEP > $LOG
+fi
+
+# --- defaults (override in the config file, see --init-config) ---
+VPN_EXPECTED=1                 # 0 = no VPN in use: tunnel checks become informational
+VPN_ORG_MATCH=""               # regex: who should own the exit IP
+TUNNEL_PREFIX="utun"           # tunnel interface prefix
+ALLOWED_LISTENERS=(ControlCenter rapportd sharingd remoted AirPlayXPCHelper)
+IP_ENDPOINTS=(https://ipinfo.io/json https://ifconfig.co/json)
+RDAP_ENDPOINT=https://rdap.org/ip   # registry: who owns an address block
+NET_TIMEOUT=8
+UI_LANG=""                     # "en" or "uk"; empty = follow the macOS language
+
+[[ -r $CONF ]] && source $CONF
+
+# --- language ---
+UI=${SECCHECK_LANG:-$UI_LANG}
+if [[ -z $UI ]]; then
+  UI=$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2{s/[" ,]//g;p;}')
+fi
+[[ $UI == uk* ]] && UI=uk || UI=en
+
+typeset -A T
+if [[ $UI == uk ]]; then T=(
+  h_net        "МЕРЕЖА"
+  h_ports      "ВІДКРИТІ ПОРТИ"
+  h_dev        "ПРИСТРІЙ"
+  h_bak        "БЕКАПИ"
+  l_route      "Маршрут"
+  l_uplink     "Канал"
+  l_dns        "DNS"
+  l_ipv6       "IPv6"
+  l_exit       "Точка виходу"
+  l_gw         "Локальний шлюз"
+  l_listen     "Слухачі"
+  l_fv         "FileVault"
+  l_sip        "SIP"
+  l_gk         "Gatekeeper"
+  l_fw         "Фаєрвол"
+  l_stealth    "Stealth mode"
+  l_disk       "Місце на диску"
+  l_tm         "Time Machine"
+  unknown      "невідомо"
+  route_none   "маршруту за замовчуванням нема — мережі немає"
+  route_tun    "%s — весь трафік у тунелі"
+  route_out    "%s — трафік ПОЗА тунелем"
+  route_plain  "%s — без VPN, як і налаштовано"
+  uplink_ok    "%s — %s"
+  uplink_none  "фізичний інтерфейс з адресою не знайдено"
+  dns_none     "резолвер не визначено"
+  dns_via      "%s через %s"
+  dns_out      "%s через %s — запити ПОЗА тунелем"
+  v6_none      "маршруту нема — витекти нічим"
+  v6_tun       "%s — у тунелі"
+  v6_out       "%s — обходить тунель"
+  v6_plain     "%s — без VPN, як і налаштовано"
+  exit_skip    "перевірку пропущено (--no-net)"
+  exit_noresp  "не вдалось визначити (нема відповіді)"
+  exit_ok      "%s, %s — %s"
+  exit_owner   "%s, %s — %s · блок %s"
+  exit_unset   "%s, %s — %s · провайдера не задано (VPN_ORG_MATCH)"
+  exit_bad     "%s · %s, %s — %s (не VPN!)"
+  gw_none      "не оголошений"
+  gw_up        "%s відповідає — ти видимий у локалці"
+  gw_up_plain  "%s відповідає"
+  gw_down      "%s недосяжний — локалка відрізана"
+  gw_blocked   "%s заблокований для цього процесу — kill switch або дозвіл «Локальна мережа»"
+  listen_none  "назовні нічого не слухає"
+  listen_ok    "%s — у списку дозволених"
+  listen_unk   "процес не визначено (запусти з sudo, щоб побачити)"
+  listen_bad   "%s — НЕ У СПИСКУ, доступний з мережі"
+  on           "увімкнено"
+  off          "вимкнено"
+  off_loud     "ВИМКНЕНО"
+  sip_custom   "нестандартна конфігурація — частково вимкнено"
+  disk         "зайнято %s%%, вільно %s ГБ"
+  disk_bad     "зайнято %s%%, вільно %s ГБ — локальні знімки не втримаються"
+  tm_none      "призначень не налаштовано"
+  tm_unavail   "конфіг недоступний"
+  enc          "зашифрований"
+  notenc       "НЕ зашифрований"
+  sum_bad      "Проблем: %s"
+  sum_bad_w    ", попереджень: %s"
+  sum_warn     "Попереджень: %s"
+  sum_warn_b   ", проблем нема"
+  sum_ok       "Все чисто"
+  n_clean      "чисто"
+  n_clean_body "проблем більше нема"
+  agent_ok     "агент встановлено, перевірка кожні %sс, лог: %s"
+  agent_fail   "не вдалось завантажити агент; plist лежить у %s"
+  agent_rm     "агент прибрано"
+  agent_int    "інтервал має бути цілим числом секунд, а не «%s»"
+  conf_exists  "конфіг уже є, не чіпаю: %s"
+  conf_written "конфіг створено: %s"
+  bad_opt      "невідомий параметр: %s"
+  usage        "використання: seccheck [--quiet] [--json] [--no-net] [--notify]
+       seccheck --install-agent [секунди]   фонова перевірка через launchd (типово 1800)
+       seccheck --uninstall-agent
+       seccheck --init-config               створити конфіг із поясненнями
+       seccheck --version | --help
+коди виходу: 0 чисто · 1 попередження · 2 проблеми
+конфіг: %s"
+) else T=(
+  h_net        "NETWORK"
+  h_ports      "OPEN PORTS"
+  h_dev        "DEVICE"
+  h_bak        "BACKUPS"
+  l_route      "Route"
+  l_uplink     "Uplink"
+  l_dns        "DNS"
+  l_ipv6       "IPv6"
+  l_exit       "Exit point"
+  l_gw         "LAN gateway"
+  l_listen     "Listeners"
+  l_fv         "FileVault"
+  l_sip        "SIP"
+  l_gk         "Gatekeeper"
+  l_fw         "Firewall"
+  l_stealth    "Stealth mode"
+  l_disk       "Disk space"
+  l_tm         "Time Machine"
+  unknown      "unknown"
+  route_none   "no default route — offline"
+  route_tun    "%s — all traffic goes through the tunnel"
+  route_out    "%s — traffic BYPASSES the tunnel"
+  route_plain  "%s — no VPN, as configured"
+  uplink_ok    "%s — %s"
+  uplink_none  "no physical interface with an address"
+  dns_none     "resolver not found"
+  dns_via      "%s via %s"
+  dns_out      "%s via %s — queries BYPASS the tunnel"
+  v6_none      "no route — nothing to leak"
+  v6_tun       "%s — inside the tunnel"
+  v6_out       "%s — bypasses the tunnel"
+  v6_plain     "%s — no VPN, as configured"
+  exit_skip    "skipped (--no-net)"
+  exit_noresp  "could not determine (no response)"
+  exit_ok      "%s, %s — %s"
+  exit_owner   "%s, %s — %s · block owner %s"
+  exit_unset   "%s, %s — %s · provider not set (VPN_ORG_MATCH)"
+  exit_bad     "%s · %s, %s — %s (not your VPN!)"
+  gw_none      "not advertised"
+  gw_up        "%s responds — you are visible on the LAN"
+  gw_up_plain  "%s responds"
+  gw_down      "%s unreachable — LAN is cut off"
+  gw_blocked   "%s blocked for this process — kill switch or Local Network permission"
+  listen_none  "nothing listens on external addresses"
+  listen_ok    "%s — allowlisted"
+  listen_unk   "process unknown (run with sudo to see it)"
+  listen_bad   "%s — NOT ALLOWLISTED, reachable from the network"
+  on           "on"
+  off          "off"
+  off_loud     "OFF"
+  sip_custom   "custom configuration — partly disabled"
+  disk         "%s%% used, %s GB free"
+  disk_bad     "%s%% used, %s GB free — local snapshots will not survive"
+  tm_none      "no destinations configured"
+  tm_unavail   "config unreadable"
+  enc          "encrypted"
+  notenc       "NOT encrypted"
+  sum_bad      "Problems: %s"
+  sum_bad_w    ", warnings: %s"
+  sum_warn     "Warnings: %s"
+  sum_warn_b   ", no problems"
+  sum_ok       "All clear"
+  n_clean      "all clear"
+  n_clean_body "no problems left"
+  agent_ok     "agent installed, checking every %ss, log: %s"
+  agent_fail   "could not load the agent; the plist is at %s"
+  agent_rm     "agent removed"
+  agent_int    "the interval must be a whole number of seconds, not '%s'"
+  conf_exists  "config already exists, left untouched: %s"
+  conf_written "config created: %s"
+  bad_opt      "unknown option: %s"
+  usage        "usage: seccheck [--quiet] [--json] [--no-net] [--notify]
+       seccheck --install-agent [seconds]   background check via launchd (default 1800)
+       seccheck --uninstall-agent
+       seccheck --init-config               write a commented config file
+       seccheck --version | --help
+exit codes: 0 clean · 1 warnings · 2 problems
+config: %s"
+) fi
+
+say() {  # say <message id> [printf args…]
+  local text
+  printf -v text "${T[$1]}" "${@:2}"
+  print -r -- $text
+}
+
+# --- launchd agent ---
+AGENT_LABEL=io.github.yaroslavtkachenko-dev.seccheck
+AGENT_PLIST=$HOME/Library/LaunchAgents/$AGENT_LABEL.plist
+
+install_agent() {
+  local interval=${1:-1800}
+  if [[ $interval != <-> ]]; then say agent_int $interval >&2; return 64; fi
+  mkdir -p ${AGENT_PLIST:h} ${LOG:h}
+  cat > $AGENT_PLIST <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$AGENT_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$SELF</string><string>--quiet</string><string>--notify</string>
+  </array>
+  <key>StartInterval</key><integer>$interval</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$LOG</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout gui/$UID $AGENT_PLIST 2>/dev/null
+  if launchctl bootstrap gui/$UID $AGENT_PLIST 2>/dev/null; then
+    say agent_ok $interval $LOG
+  else
+    say agent_fail $AGENT_PLIST; return 1
+  fi
+}
+
+uninstall_agent() {
+  launchctl bootout gui/$UID $AGENT_PLIST 2>/dev/null
+  rm -f $AGENT_PLIST && say agent_rm
+}
+
+init_config() {
+  if [[ -e $CONF ]]; then say conf_exists $CONF; return 1; fi
+  mkdir -p ${CONF:h} || return 1
+  cat > $CONF <<'EOF'
+# seccheck config. Sourced as zsh on every run; delete a line to get the default.
+
+# 1 = you use a VPN and a missing tunnel is a problem.
+# 0 = no VPN: route, DNS, IPv6 and exit point are shown but never alarm.
+VPN_EXPECTED=1
+
+# Regex (case-insensitive, whole words) naming who should own your exit IP. It
+# is matched against the exit ASN name and, if that fails, against the registry
+# record of the address block (its name, remarks and entity names), because
+# providers often announce their own blocks through somebody else's network.
+# To find yours: connect the VPN, run seccheck, read the "Exit point" row, then
+# look at  curl -s https://rdap.org/ip/<that address>
+# Example: "ExampleVPN|Example Networks" (the brand, plus the company its
+# address blocks are registered to).
+# Empty = the exit point is shown but cannot be verified (a warning).
+VPN_ORG_MATCH=""
+
+# Tunnel interface prefix. WireGuard and OpenVPN on macOS use utun.
+TUNNEL_PREFIX="utun"
+
+# Processes allowed to listen on non-loopback addresses. Anything else that
+# listens is reported as a problem.
+#   ControlCenter     AirPlay Receiver (ports 5000, 7000)
+#   rapportd          Handoff / Continuity, a new port on every boot
+#   sharingd          AirDrop and sharing
+#   remoted           Apple device services
+#   AirPlayXPCHelper  AirPlay helper
+ALLOWED_LISTENERS=(ControlCenter rapportd sharingd remoted AirPlayXPCHelper)
+
+# Where to ask for the public address. The first one that answers is used.
+IP_ENDPOINTS=(https://ipinfo.io/json https://ifconfig.co/json)
+
+# Address registry (RDAP), asked only when the exit ASN does not match.
+# Empty disables that second look.
+RDAP_ENDPOINT=https://rdap.org/ip
+
+# Timeout for each network request, seconds.
+NET_TIMEOUT=8
+
+# Output language: "en" or "uk". Empty = follow the macOS language.
+UI_LANG=""
+EOF
+  say conf_written $CONF
+}
+
+# --- flags ---
+QUIET=0 JSON=0 NO_NET=0 NOTIFY=0
+while (( $# )); do
+  case $1 in
+    --quiet|-q)        QUIET=1 ;;
+    --json)            JSON=1 ;;
+    --no-net)          NO_NET=1 ;;
+    --notify)          NOTIFY=1 ;;
+    --install-agent)   install_agent $2; exit $? ;;
+    --uninstall-agent) uninstall_agent; exit $? ;;
+    --init-config)     init_config; exit $? ;;
+    --version|-V)      print -- "seccheck $VERSION"; exit 0 ;;
+    --help|-h)         say usage $CONF; exit 0 ;;
+    *)                 print -u2 -- "seccheck: $(say bad_opt $1)"; say usage $CONF >&2; exit 64 ;;
+  esac
+  shift
+done
+
+# --- output ---
+autoload -U colors && colors
+if [[ -t 1 && $JSON -eq 0 ]]; then
+  C_OK=$fg[green]; C_WARN=$fg[yellow]; C_BAD=$fg[red]
+  C_DIM=$fg_bold[black]; C_HEAD=$fg_bold[white]; C_OFF=$reset_color
+else
+  C_OK= C_WARN= C_BAD= C_DIM= C_HEAD= C_OFF=
+fi
+
+typeset -i WARNS=0 FAILS=0
+typeset -a JROWS ISSUES
+typeset -A ISSUE_NAME ISSUE_TEXT
+
+NAME_W=20
+
+# A problem's identity between runs is its stable key, never its text. The
+# text is localised and may carry volatile parts (the exit address, the disk
+# percentage); if it were the identity, every new digit would look like a new
+# problem and fire a new notification.
+row() {  # row <ok|warn|bad> <label> <text> [stable key]
+  local st=$1 name=$2 val=$3 id="$1|${4:-$2}" mark col sp=""
+  case $st in
+    ok)   mark="✓"; col=$C_OK ;;
+    warn) mark="!"; col=$C_WARN; (( WARNS++ )) ;;
+    bad)  mark="✗"; col=$C_BAD; (( FAILS++ )) ;;
+  esac
+  local jn=${${name//\\/\\\\}//\"/\\\"} jv=${${val//\\/\\\\}//\"/\\\"}
+  JROWS+=( "{\"status\":\"$st\",\"check\":\"$jn\",\"value\":\"$jv\"}" )
+  if [[ $st != ok ]]; then
+    ISSUES+=( "$id" ); ISSUE_NAME+=( "$id" "$name" ); ISSUE_TEXT+=( "$id" "$val" )
+  fi
+  (( JSON )) && return
+  [[ $QUIET == 1 && $st == ok ]] && return
+  # ${#name} counts characters in zsh, so non-ASCII labels keep the columns
+  # straight, unlike %-Ns in printf, which pads by bytes
+  local -i pad=$(( NAME_W - ${#name} ))
+  (( pad < 1 )) && pad=1
+  repeat $pad sp+=" "
+  printf "  ${col}%s${C_OFF}  %s%s%s\n" $mark $name $sp $val
+}
+
+r() {  # r <status> <label> <stable key> <message id> [printf args…]
+  local text
+  printf -v text "${T[$4]}" "${@:5}"
+  row $1 "$2" "$text" "$3"
+}
+
+head_() { (( JSON || QUIET )) && return; print -- "\n  ${C_HEAD}${T[$1]}${C_OFF}"; }
+
+# ───────────────────────────── network ─────────────────────────────
+head_ h_net
+
+DEF_IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+if [[ -z $DEF_IF ]]; then
+  r bad "${T[l_route]}" route:none route_none
+elif [[ $DEF_IF == ${TUNNEL_PREFIX}* ]]; then
+  r ok "${T[l_route]}" - route_tun $DEF_IF
+elif (( VPN_EXPECTED )); then
+  r bad "${T[l_route]}" route:bypass route_out $DEF_IF
+else
+  r ok "${T[l_route]}" - route_plain $DEF_IF
+fi
+
+# physical uplink
+PHYS_IF= PHYS_IP=
+for i in ${(f)"$(ifconfig -l | tr ' ' '\n')"}; do
+  [[ $i == en* || $i == bridge* ]] || continue
+  a=$(ipconfig getifaddr $i 2>/dev/null)
+  [[ -n $a ]] && { PHYS_IF=$i; PHYS_IP=$a; break }
+done
+if [[ -n $PHYS_IF ]]; then r ok "${T[l_uplink]}" - uplink_ok $PHYS_IF $PHYS_IP
+else r warn "${T[l_uplink]}" uplink:none uplink_none; fi
+
+# DNS: resolver #1 must be bound to the tunnel
+DNS_INFO=$(scutil --dns 2>/dev/null | awk '
+  /^resolver #1$/ {f=1; next}
+  f && /^resolver #/ {exit}
+  f && /nameserver\[0\]/ {ns=$3}
+  f && /if_index/ {ifc=$4; gsub(/[()]/,"",ifc)}
+  END {print ns "|" ifc}')
+DNS_NS=${DNS_INFO%%|*}; DNS_IF=${DNS_INFO##*|}
+if [[ -z $DNS_NS ]]; then
+  r warn "${T[l_dns]}" dns:none dns_none
+elif [[ $DNS_IF == ${TUNNEL_PREFIX}* ]] || (( ! VPN_EXPECTED )); then
+  r ok "${T[l_dns]}" - dns_via $DNS_NS "${DNS_IF:-${T[unknown]}}"
+else
+  r bad "${T[l_dns]}" dns:bypass dns_out $DNS_NS "${DNS_IF:-${T[unknown]}}"
+fi
+
+# IPv6: either inside the tunnel or no route at all
+V6_IF=$(route -n get -inet6 default 2>/dev/null | awk '/interface:/{print $2}')
+if [[ -z $V6_IF ]]; then
+  r ok "${T[l_ipv6]}" - v6_none
+elif [[ $V6_IF == ${TUNNEL_PREFIX}* ]]; then
+  r ok "${T[l_ipv6]}" - v6_tun $V6_IF
+elif (( VPN_EXPECTED )); then
+  r bad "${T[l_ipv6]}" ipv6:bypass v6_out $V6_IF
+else
+  r ok "${T[l_ipv6]}" - v6_plain $V6_IF
+fi
+
+# exit point
+vpn_match() {  # prints what matched if $1 names the VPN provider: whole words, any case
+  setopt localoptions nocasematch
+  # Whole words only, so that a short pattern cannot pass on a longer,
+  # unrelated name. This check has to fail closed.
+  local re="(^|[^[:alnum:]])($VPN_ORG_MATCH)($|[^[:alnum:]])"
+  [[ $1 =~ $re ]] && print -r -- $match[2]
+}
+
+is_ip() { [[ $1 =~ '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || $1 =~ '^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*$' ]] }
+
+# The fields of a registry record that say whose block it is: the network
+# name, its remarks and the names of the entities attached to it. Matching the
+# whole response instead would let a stray word in a notice or a link pass for
+# the provider.
+rdap_owners() {  # rdap_owners <json>  ->  one candidate per line
+  local json=$1 v i j
+  rdap_get() { print -r -- $json | plutil -extract $1 raw -o - - 2>/dev/null }
+  rdap_get name
+  for i in {0..7}; do
+    rdap_get remarks.$i >/dev/null || break
+    for j in {0..7}; do rdap_get remarks.$i.description.$j || break; done
+  done
+  for i in {0..15}; do
+    rdap_get entities.$i >/dev/null || break
+    for j in {0..11}; do
+      v=$(rdap_get entities.$i.vcardArray.1.$j.0) || break
+      if [[ $v == fn ]]; then rdap_get entities.$i.vcardArray.1.$j.3; break; fi
+    done
+  done
+}
+
+if (( NO_NET )); then
+  r ok "${T[l_exit]}" - exit_skip
+else
+  EXIT_JSON=
+  for u in $IP_ENDPOINTS; do
+    EXIT_JSON=$(curl -fsS --max-time $NET_TIMEOUT $u 2>/dev/null) && [[ -n $EXIT_JSON ]] && break
+  done
+  # These strings come from a remote service and end up in the terminal, in a
+  # notification and, for the address, in a URL. Control characters are
+  # dropped, and anything that is not an address literal is not an answer.
+  jget() { print -r -- $EXIT_JSON | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1 | tr -d '[:cntrl:]' }
+  E_IP=$(jget ip); E_CITY=$(jget city); E_CC=$(jget country)
+  E_ORG=$(jget org); [[ -z $E_ORG ]] && E_ORG=$(jget asn_org)
+  if ! is_ip $E_IP; then
+    r warn "${T[l_exit]}" exit:noresp exit_noresp
+  elif (( ! VPN_EXPECTED )); then
+    r ok "${T[l_exit]}" - exit_ok $E_CITY $E_CC $E_ORG
+  elif [[ -z $VPN_ORG_MATCH ]]; then
+    r warn "${T[l_exit]}" exit:unset exit_unset $E_CITY $E_CC $E_ORG
+  elif vpn_match $E_ORG >/dev/null; then
+    r ok "${T[l_exit]}" - exit_ok $E_CITY $E_CC $E_ORG
+  else
+    # The ASN name is whoever ANNOUNCES the route, not whoever owns the address
+    # block. VPN providers often announce their own blocks through a hosting
+    # company, so before raising the alarm, ask the registry who the block
+    # belongs to.
+    E_OWNER=
+    if [[ -n $RDAP_ENDPOINT ]]; then
+      # rdap.org answers with a redirect to the regional registry; follow it,
+      # but only over https and only a few hops
+      RDAP=$(curl -fsSL --proto-redir '=https' --max-redirs 3 --max-time $NET_TIMEOUT $RDAP_ENDPOINT/$E_IP 2>/dev/null)
+      if [[ -n $RDAP ]]; then
+        for cand in ${(f)"$(rdap_owners $RDAP)"}; do
+          E_OWNER=$(vpn_match $cand) && break
+        done
+      fi
+    fi
+    if [[ -n $E_OWNER ]]; then
+      r ok "${T[l_exit]}" - exit_owner $E_CITY $E_CC $E_ORG $E_OWNER
+    else
+      # keyed by the ASN, not the address: the address changes on every reconnect
+      r bad "${T[l_exit]}" "exit:$E_ORG" exit_bad $E_IP $E_CITY $E_CC $E_ORG
+    fi
+  fi
+fi
+
+# is the local gateway reachable
+GW=
+[[ -n $PHYS_IF ]] && GW=$(ipconfig getoption $PHYS_IF router 2>/dev/null)
+if [[ -z $GW || $GW == 0.0.0.0 ]]; then
+  r ok "${T[l_gw]}" - gw_none
+else
+  PING=$(ping -c1 -W 1200 $GW 2>&1); PING_RC=$?
+  if (( PING_RC == 0 )); then
+    if (( VPN_EXPECTED )); then r warn "${T[l_gw]}" "gw:$GW" gw_up $GW
+    else r ok "${T[l_gw]}" - gw_up_plain $GW; fi
+  elif [[ $PING == *sendto:* ]]; then
+    # The packet never left this Mac: something local refused to send it. That
+    # is either the VPN's kill switch or macOS denying local network access to
+    # the app seccheck was started from. The two look the same from here, and
+    # the second says nothing about other processes, so the row says so
+    # instead of claiming the LAN is cut off.
+    r ok "${T[l_gw]}" - gw_blocked $GW
+  else
+    r ok "${T[l_gw]}" - gw_down $GW
+  fi
+fi
+
+# ─────────────────── ports open to the network ───────────────────
+head_ h_ports
+
+typeset -a EXPOSED
+EXPOSED=( ${(f)"$(netstat -an -p tcp 2>/dev/null \
+  | awk '$NF=="LISTEN"{print $4}' \
+  | grep -vE '^(127\.|::1\.|fe80)' \
+  | awk -F. '{print $NF}' \
+  | sort -nu)"} )
+
+if (( ${#EXPOSED} == 0 )); then
+  r ok "${T[l_listen]}" - listen_none
+else
+  for port in $EXPOSED; do
+    proc=$(lsof -nP -iTCP:$port -sTCP:LISTEN -Fc 2>/dev/null | grep '^c' | head -1)
+    proc=${proc#c}
+    if [[ -z $proc ]]; then
+      r warn "$port/tcp" "port:$port:unknown" listen_unk
+    elif (( ${ALLOWED_LISTENERS[(Ie)$proc]} )); then
+      r ok "$port/tcp" - listen_ok $proc
+    else
+      r bad "$port/tcp" "port:$port:$proc" listen_bad $proc
+    fi
+  done
+fi
+
+# ───────────────────────────── device ─────────────────────────────
+head_ h_dev
+
+if [[ $(fdesetup status 2>/dev/null) == *"is On"* ]]; then r ok "${T[l_fv]}" - on
+else r bad "${T[l_fv]}" filevault off_loud; fi
+
+# Match the status line itself. With a custom configuration csrutil prints
+# "status: unknown" followed by a list in which most items still say "enabled".
+SIP=$(csrutil status 2>/dev/null)
+if [[ $SIP == *"status: enabled."* ]]; then r ok "${T[l_sip]}" - on
+elif [[ $SIP == *"Custom Configuration"* ]]; then r bad "${T[l_sip]}" sip:custom sip_custom
+else r bad "${T[l_sip]}" sip off; fi
+
+if [[ $(spctl --status 2>/dev/null) == *"assessments enabled"* ]]; then r ok "${T[l_gk]}" - on
+else r bad "${T[l_gk]}" gatekeeper off; fi
+
+ALF=/usr/libexec/ApplicationFirewall/socketfilterfw
+if [[ -x $ALF ]]; then
+  if [[ $($ALF --getglobalstate 2>/dev/null) == *enabled* ]]; then r ok "${T[l_fw]}" - on
+  else r bad "${T[l_fw]}" firewall off_loud; fi
+  if [[ $($ALF --getstealthmode 2>/dev/null) == *"is on"* ]]; then r ok "${T[l_stealth]}" - on
+  else r warn "${T[l_stealth]}" stealth off; fi
+fi
+
+# the Data volume, not / — on APFS the root is read-only and always looks ~25% full
+DATA=/System/Volumes/Data
+FREE=$(df -g $DATA 2>/dev/null | awk 'NR==2{print $4}')
+USEPCT=$(df $DATA 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+if (( USEPCT >= 95 )); then
+  r bad "${T[l_disk]}" disk disk_bad $USEPCT $FREE
+elif (( USEPCT >= 85 )); then
+  r warn "${T[l_disk]}" disk disk $USEPCT $FREE
+else
+  r ok "${T[l_disk]}" - disk $USEPCT $FREE
+fi
+
+# ───────────────────────────── backups ─────────────────────────────
+head_ h_bak
+
+# the file fails a -r test, yet `defaults` reads it, so just try
+TMPL=/Library/Preferences/com.apple.TimeMachine.plist
+TMRAW=$(defaults read $TMPL 2>/dev/null)
+if [[ -n $TMRAW ]]; then
+  DESTS=$(print -r -- $TMRAW | awk '
+    /LastKnownEncryptionState/ {enc=$3; gsub(/[;"]/,"",enc)}
+    /LastKnownVolumeName/ {
+      name=""; for(i=3;i<=NF;i++) name=name (i>3?" ":"") $i
+      gsub(/[;"]/,"",name); gsub(/\\U2019/,"'\''",name)
+      print enc "|" name
+    }')
+  if [[ -z $DESTS ]]; then
+    r warn "${T[l_tm]}" tm:none tm_none
+  else
+    for d in ${(f)DESTS}; do
+      enc=${d%%|*}; name=${d##*|}
+      short=${name[1,NAME_W-1]}
+      if [[ $enc == Encrypted ]]; then r ok "$short" - enc
+      else r bad "$short" "tm:$name" notenc; fi
+    done
+  fi
+else
+  r warn "${T[l_tm]}" tm:unavail tm_unavail
+fi
+
+# ───────────────────────────── summary ─────────────────────────────
+if (( JSON )); then
+  print -r -- "{\"version\":\"$VERSION\",\"ts\":\"$(date -u +%FT%TZ)\",\"warnings\":$WARNS,\"failures\":$FAILS,\"rows\":[${(j:,:)JROWS}]}"
+elif (( ! QUIET || WARNS || FAILS )); then
+  print ""
+  if (( FAILS )); then
+    print -- "  ${C_BAD}$(say sum_bad $FAILS)${C_OFF}$(say sum_bad_w $WARNS)"
+  elif (( WARNS )); then
+    print -- "  ${C_WARN}$(say sum_warn $WARNS)${C_OFF}${T[sum_warn_b]}"
+  else
+    print -- "  ${C_OK}${T[sum_ok]}${C_OFF}"
+  fi
+  print -- "  ${C_DIM}$(date '+%Y-%m-%d %H:%M')${C_OFF}\n"
+fi
+
+# Notify on a CHANGE of state, not on the state itself. A monitor that repeats
+# the same thing every half hour turns into noise within two days, and the one
+# genuinely new line gets lost along with the old reminder.
+notify() {  # notify <title> <body>
+  local t=${${1//\"/}//\\/} b=${${2//\"/}//\\/}
+  osascript -e "display notification \"$b\" with title \"seccheck: $t\"" 2>/dev/null
+}
+
+if (( NOTIFY )); then
+  now=${(pj:\n:)${(o)ISSUES}}
+  prev=$(cat $STATE_FILE 2>/dev/null)
+
+  if [[ $now != $prev ]]; then
+    typeset -a fresh
+    for i in ${(f)now}; do
+      [[ $'\n'$prev$'\n' == *$'\n'$i$'\n'* ]] || fresh+=( "$i" )
+    done
+
+    if (( ${#fresh} )); then
+      f=${fresh[1]}; more=
+      (( ${#fresh} > 1 )) && more=" (+$(( ${#fresh} - 1 )))"
+      notify "${ISSUE_NAME[$f]}$more" "${ISSUE_TEXT[$f]}"
+    elif [[ -z $now ]]; then
+      notify "${T[n_clean]}" "${T[n_clean_body]}"
+    fi
+
+    mkdir -p ${STATE_FILE:h} && print -r -- $now > $STATE_FILE
+  fi
+fi
+
+(( FAILS )) && exit 2
+(( WARNS )) && exit 1
+exit 0
