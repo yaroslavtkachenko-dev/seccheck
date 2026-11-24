@@ -27,3 +27,21 @@ jobs:
         run: ./seccheck --no-net || true
         env:
           SECCHECK_LANG: en
+
+  test-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tests
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run.ps1; exit $LASTEXITCODE
+
+      # As on macOS: a hosted runner is no laptop, and the report shows it.
+      # This step only shows that a real run completes.
+      - name: Smoke run
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File seccheck.ps1 --no-net; exit 0
+        env:
+          SECCHECK_LANG: en
