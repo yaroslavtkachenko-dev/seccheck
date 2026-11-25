@@ -5,7 +5,7 @@
 
 **Is your Mac actually in the state you think it is?** One command answers: is the traffic really inside the VPN, is DNS leaking, what is listening on the network, is the disk encrypted, are the backups.
 
-One zsh file. No sudo, no dependencies, nothing to install besides the script.
+One zsh file. No sudo, no dependencies, nothing to install besides the script. For Windows there is `seccheck.ps1`, see [Windows](#windows).
 
 ![seccheck output](assets/demo.svg)
 
@@ -93,6 +93,60 @@ This installs a LaunchAgent, `io.github.yaroslavtkachenko-dev.seccheck`, which r
 
 A monitor that repeats the same thing every half hour becomes noise within two days, and the one new line gets lost with the old reminder.
 
+## Windows
+
+`seccheck.ps1` is the same check for Windows: one PowerShell file, no admin rights, nothing to install. It runs on Windows PowerShell 5.1, which every Windows 10 and 11 has.
+
+```powershell
+git clone https://github.com/yaroslavtkachenko-dev/seccheck.git
+cd seccheck
+.\seccheck.cmd
+```
+
+`seccheck.cmd` runs the script whatever the PowerShell execution policy is; put the folder on your `PATH` to run `seccheck` from anywhere. The flags, the JSON (with an extra `"platform":"windows"`) and the exit codes are the same as on macOS. The config is `%APPDATA%\seccheck\seccheck.conf.ps1`; the state and the log live in `%LOCALAPPDATA%\seccheck`.
+
+What it checks on Windows, where it differs:
+
+| Area | Check | It is a problem when |
+|---|---|---|
+| Network | Route | the route Windows uses for an internet address goes neither through a known tunnel adapter (`TUNNEL_MATCH`) nor through a built-in Windows VPN that Windows reports as connected |
+| | Network profile | it is Private while a VPN is expected, so other machines on the network see this PC (a warning) |
+| Open ports | Listeners | a process outside the allowlist listens on a non-loopback address and the firewall lets the network in; a warning while the firewall still blocks it |
+| Device | BitLocker | the system drive is not encrypted, or its protection is suspended |
+| | Antivirus, firewall, Secure Boot, UAC | any of them is off |
+| | SMBv1 | it is enabled |
+| | Remote Desktop | it accepts connections (a warning) |
+| | Windows Update | the last OS update is 40 days old (a warning) or 60 |
+| AI agents | Claude Code | bypass mode is the default; a warning while it is not disabled or `permissions.deny` is empty |
+| | Codex | it runs without a sandbox; a warning when it never asks |
+| | MCP servers | a config holds a plaintext token; a warning for a package run by `npx` without a pinned version |
+| | Ollama | `OLLAMA_HOST` opens it to the network |
+
+**A listening port is not an open port.** Every Windows PC listens on 135, 445 and a handful of RPC ports, and on a Public network the firewall drops them all. Reported as they are, they would be red on every machine. So for each listener seccheck works out from the firewall rules whether the network can reach it, and says which. A port the network can reach that belongs to a risky service (SMB, Remote Desktop, Jupyter, a database, a model server) stays a warning even when its process is allowlisted: the allowlist says "I know this process", not "this service is safe to expose". A row that is not clean says what the port exposes and how to close it:
+
+```
+  ✗  8000/tcp            Python http.server (python) — NOT ALLOWLISTED, reachable from the network
+                         PID 4821 · listening for 14 d
+                         command: python -m http.server 8000
+                         risk: serves the files of its folder to everyone on the network
+                         fix: stop it, or start it with --bind 127.0.0.1
+```
+
+A port number alone is a hint, not proof, so a port is named only when its process fits: 11434 is Ollama only when `ollama` owns it. Anything in a command line that looks like a secret is cut out before it reaches the terminal or the log.
+
+**AI agents.** An agent runs as you, with your keys, and takes instructions from whatever it reads. These rows show how much it may do without asking, and since notifications fire on a change, loosening a setting, or an MCP server appearing with a token in its config, is reported the next time the agent runs. A token is reported by its kind and file, never by its value.
+
+`--install-agent` creates a Task Scheduler task for the current user under the same name as the LaunchAgent; it needs no admin rights. It runs through `conhost --headless`, so no console window flashes every half hour, and notifications are Windows toasts.
+
+Limits on Windows:
+
+- **The firewall verdict is worked out from the rules, not measured.** It covers ports, programs, services, block rules and network profiles. It skips the rules of Store apps and of Wi-Fi Direct, which allow everything but apply only inside their own app or adapter. It does not model IPsec, edge traversal or third-party firewalls. When it cannot tell, it errs towards "reachable".
+- **A tunnel is recognised, never guessed.** By the names of the VPNs' own adapters and drivers in `TUNNEL_MATCH`, or, for Windows' built-in VPN (IKEv2, SSTP, L2TP, PPTP), by Windows' own list of connected VPN connections; PPPoE broadband is PPP too and does not count. Nothing counts as a tunnel just because its name says "VPN". An adapter seccheck does not know reads as outside the tunnel, and the row tells you to add it to `TUNNEL_MATCH` if it is yours: the check errs towards an alarm, never towards calm.
+- **The DNS row shows the resolvers of the interface that carries the route.** Windows may still send a query out of every interface that has a resolver.
+- **Other users' processes have no path or command line without admin rights**, so firewall rules for a specific program count for them.
+- **No backup check yet.**
+- **Tested on Windows 11 with Windows PowerShell 5.1**, with NordVPN over NordLynx and over OpenVPN. OpenVPN does not replace the default route but adds two half routes (`0.0.0.0/1`, `128.0.0.0/1`), so seccheck asks Windows which route an internet address would take rather than reading the default route. It talks to the same two services as on macOS; everything else is built in: the NetTCPIP, NetAdapter and DnsClient cmdlets, the firewall's `HNetCfg.FwPolicy2`, `Get-MpComputerStatus`, `Get-HotFix` and Explorer's volume properties.
+
 ## An ASN is not an owner
 
 The first version checked the exit point by comparing the ASN name of the public address with the VPN provider's name. It then raised a false alarm for twelve days on perfectly healthy connections.
@@ -148,6 +202,14 @@ zsh tests/run.zsh
 ```
 
 The tests are offline: the exit address and the registry record come from local files, and `osascript` is replaced by a stub, so no notification is sent and nothing in your home directory is touched.
+
+On Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\run.ps1
+```
+
+The same rules hold: toasts go to a file, agent configs come from a temp directory. The firewall and port logic is tested on its own, against rule sets built in the test.
 
 ## Roadmap
 
