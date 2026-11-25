@@ -662,6 +662,15 @@ function Get-Reach($fw, [int]$port, $proc) {  # open | lan | blocked
   'lan'
 }
 
+# Windows' own processes open dynamic RPC endpoints (49152 and up) on every
+# machine, and which services own them varies from one machine to the next. While
+# the firewall drops them they are part of the OS, not a finding, allowlisted or
+# not; one row says so. A reachable one is judged like any other listener.
+$SYS_RPC = 'lsass', 'wininit', 'services', 'spoolsv', 'svchost'
+function Test-SystemRpc([int]$port, [string]$name, [string]$reach) {
+  $port -ge 49152 -and $name -in $SYS_RPC -and $reach -eq 'blocked'
+}
+
 function Test-Allowed($proc) {
   if ($ALLOWED_LISTENERS -contains $proc.Name) { return $true }
   foreach ($s in $proc.Services) { if ($ALLOWED_LISTENERS -contains "$($proc.Name):$s") { return $true } }
@@ -1014,7 +1023,6 @@ if (-not $LISTEN.Count) {
     $SVC[[int]$s.ProcessId] = @($SVC[[int]$s.ProcessId] | Where-Object { $_ }) + $s.Name
   }
   $RPC = New-Object Collections.Generic.List[int]
-  $SYS_RPC = 'lsass', 'wininit', 'services', 'spoolsv', 'svchost'
   foreach ($c in $LISTEN) {
     $port = [int]$c.LocalPort; $procId = [int]$c.OwningProcess
     $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
@@ -1028,6 +1036,8 @@ if (-not $LISTEN.Count) {
 
     $label = "$port/tcp"
     if (-not $name) { Row warn $label (Fmt p_unk) "port:${port}:unknown"; continue }
+    $reach = Get-Reach $FW $port $proc
+    if (Test-SystemRpc $port $name $reach) { $RPC.Add($port); continue }
 
     # the command line of the user's own processes is readable without admin
     # rights; it tells a Python http.server from any other Python
@@ -1037,13 +1047,8 @@ if (-not $LISTEN.Count) {
     $entry = Get-PortEntry $port $proc
     $who = if ($name -eq 'svchost' -and $svcs.Count) { "svchost: $($svcs[0])" } else { $name }
     $what = if ($entry) { "$($entry.Name) ($who)" } else { $who }
-    $reach = Get-Reach $FW $port $proc
     $risky = [bool]($entry -and $entry.Class -in 'exec', 'data', 'ai')
     $st, $msg = Get-PortVerdict $reach (Test-Allowed $proc) $risky
-
-    # Dozens of dynamic RPC endpoints are on every Windows machine; when the
-    # firewall drops them all, one row says so instead of a screenful.
-    if ($st -eq 'ok' -and $port -ge 49152 -and $name -in $SYS_RPC -and $reach -eq 'blocked') { $RPC.Add($port); continue }
 
     $details = @()
     if ($st -ne 'ok') {

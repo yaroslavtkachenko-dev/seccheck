@@ -6,7 +6,7 @@ Windows version, `seccheck.ps1`, with `seccheck.cmd` to run it from anywhere.
 
 - Same flags, JSON and exit codes as on macOS; the JSON adds `"platform":"windows"`. No admin rights, Windows PowerShell 5.1.
 - Network: route, network profile, DNS, IPv6, exit point (ASN, then RDAP), LAN gateway.
-- Open ports are judged against the firewall rules: a listener is a problem only when the network can reach it, and a warning while the firewall blocks it. The rules of Store apps and of Wi-Fi Direct are left out, since they apply only inside their own app or adapter.
+- Open ports are judged against the firewall rules: a listener is a problem only when the network can reach it, and a warning while the firewall blocks it. The rules of Store apps and of Wi-Fi Direct are left out, since they apply only inside their own app or adapter. Dynamic RPC endpoints of Windows' own processes are one row while the firewall blocks them, whichever service owns them.
 - Known risky ports (SMB, Remote Desktop, WinRM, Jupyter, Node inspector, Docker API, databases, Ollama, LM Studio, ComfyUI, Gradio, dev servers) name the service, the risk and the fix, and stay a warning even when allowlisted. A port is named only when its process fits. Python's `http.server` is recognised by its command line.
 - Rows that are not clean show the PID, how long the port has been listening and the command line, with anything that looks like a secret cut out.
 - Device: BitLocker, antivirus, firewall per profile, Secure Boot, UAC, SMBv1, Remote Desktop, Windows Update, disk space.

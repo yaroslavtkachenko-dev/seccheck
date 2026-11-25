@@ -261,6 +261,12 @@ eq 'not allowlisted, LAN only -> problem' ((Get-PortVerdict 'lan' $false $false)
 eq 'allowlisted but a risky service -> warning' ((Get-PortVerdict 'open' $true $true) -join ',') 'warn,p_risky'
 eq 'allowlisted, ordinary service -> ok' ((Get-PortVerdict 'open' $true $false) -join ',') 'ok,p_ok_open'
 
+eq 'a blocked RPC endpoint of any svchost service is the OS' (Test-SystemRpc 49666 'svchost' 'blocked') 'True'
+eq 'a reachable one is judged like any listener' (Test-SystemRpc 49666 'svchost' 'open') 'False'
+eq 'a LAN-reachable one too' (Test-SystemRpc 49666 'svchost' 'lan') 'False'
+eq 'a blocked high port of a user process is not the OS' (Test-SystemRpc 50000 'python' 'blocked') 'False'
+eq 'a system port below the dynamic range is not folded' (Test-SystemRpc 135 'svchost' 'blocked') 'False'
+
 $ol = [pscustomobject]@{ Name = 'ollama'; Path = $null; Services = @(); Cmd = 'ollama serve' }
 eq 'Ollama on its port is a model server' (Get-PortEntry 11434 $ol).Class 'ai'
 eq 'a port number alone is not enough' ($null -eq (Get-PortEntry 11434 $anon)) 'True'
