@@ -267,6 +267,16 @@ eq 'a LAN-reachable one too' (Test-SystemRpc 49666 'svchost' 'lan') 'False'
 eq 'a blocked high port of a user process is not the OS' (Test-SystemRpc 50000 'python' 'blocked') 'False'
 eq 'a system port below the dynamic range is not folded' (Test-SystemRpc 135 'svchost' 'blocked') 'False'
 
+# adapter descriptions as Windows reports them
+foreach ($a in 'NordLynx Tunnel', 'TAP-NordVPN Windows Adapter V9', 'TAP-Windows Adapter V9', 'OpenVPN Data Channel Offload',
+               'WireGuard Tunnel', 'Wintun Userspace Tunnel', 'Tailscale Tunnel') {
+  eq "a tunnel: $a" ($a -match $TUNNEL_MATCH) 'True'
+}
+foreach ($a in 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC', 'Realtek Gaming 2.5GbE Family Controller', 'Intel(R) Ethernet Connection I219-V',
+               'Hyper-V Virtual Ethernet Adapter') {
+  eq "not a tunnel: $a" ($a -match $TUNNEL_MATCH) 'False'
+}
+
 $ol = [pscustomobject]@{ Name = 'ollama'; Path = $null; Services = @(); Cmd = 'ollama serve' }
 eq 'Ollama on its port is a model server' (Get-PortEntry 11434 $ol).Class 'ai'
 eq 'a port number alone is not enough' ($null -eq (Get-PortEntry 11434 $anon)) 'True'

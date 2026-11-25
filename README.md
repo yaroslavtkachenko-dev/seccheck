@@ -144,7 +144,7 @@ Limits on Windows:
 - **The DNS row shows the resolvers of the interface that carries the route.** Windows may still send a query out of every interface that has a resolver.
 - **Other users' processes have no path or command line without admin rights**, so firewall rules for a specific program count for them.
 - **No backup check yet.**
-- **Tested on Windows 11 with Windows PowerShell 5.1.** It talks to the same two services as on macOS; everything else is built in: the NetTCPIP, NetAdapter and DnsClient cmdlets, the firewall's `HNetCfg.FwPolicy2`, `Get-MpComputerStatus`, `Get-HotFix` and Explorer's volume properties.
+- **Tested on Windows 11 with Windows PowerShell 5.1**, with NordVPN over NordLynx and over OpenVPN. OpenVPN does not replace the default route but adds two half routes (`0.0.0.0/1`, `128.0.0.0/1`), so seccheck asks Windows which route an internet address would take rather than reading the default route. It talks to the same two services as on macOS; everything else is built in: the NetTCPIP, NetAdapter and DnsClient cmdlets, the firewall's `HNetCfg.FwPolicy2`, `Get-MpComputerStatus`, `Get-HotFix` and Explorer's volume properties.
 
 ## An ASN is not an owner
 

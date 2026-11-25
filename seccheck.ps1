@@ -39,8 +39,10 @@ if ((Test-Path -LiteralPath $LOG) -and (Get-Item -LiteralPath $LOG).Length -gt 5
 $VPN_EXPECTED = 1                # 0 = no VPN in use: tunnel checks become informational
 $VPN_ORG_MATCH = ''              # regex: who should own the exit IP
 # Matched against the adapter's name and description. Windows has no single
-# tunnel interface prefix like macOS's utun.
-$TUNNEL_MATCH = 'WireGuard|Wintun|TAP-Windows|OpenVPN|Tailscale|ZeroTier|NordLynx|Mullvad|ProtonVPN|AnyConnect|Fortinet|PANGP|SonicWall|Cloudflare WARP'
+# tunnel interface prefix like macOS's utun. TAP- and not TAP-Windows: VPN
+# apps ship their own copy of the driver under their own name (TAP-NordVPN,
+# TAP-ProtonVPN), and the adapter's name is often just "Local Area Connection".
+$TUNNEL_MATCH = 'WireGuard|Wintun|TAP-|OpenVPN|Tailscale|ZeroTier|NordLynx|Mullvad|ProtonVPN|AnyConnect|Fortinet|PANGP|SonicWall|Cloudflare WARP'
 # Process names, or svchost:<service> for services that share a svchost.
 $ALLOWED_LISTENERS = @('System', 'lsass', 'wininit', 'services', 'spoolsv',
   'svchost:RpcSs', 'svchost:RpcEptMapper', 'svchost:CDPSvc', 'svchost:Schedule',
@@ -497,7 +499,7 @@ $VPN_ORG_MATCH = ''
 # Regex matched against the adapter name and description to recognise a
 # tunnel. Add your VPN's adapter if seccheck does not recognise it:
 #   Get-NetAdapter | Select-Object Name, InterfaceDescription
-$TUNNEL_MATCH = 'WireGuard|Wintun|TAP-Windows|OpenVPN|Tailscale|ZeroTier|NordLynx|Mullvad|ProtonVPN|AnyConnect|Fortinet|PANGP|SonicWall|Cloudflare WARP'
+$TUNNEL_MATCH = 'WireGuard|Wintun|TAP-|OpenVPN|Tailscale|ZeroTier|NordLynx|Mullvad|ProtonVPN|AnyConnect|Fortinet|PANGP|SonicWall|Cloudflare WARP'
 
 # Processes allowed to listen on non-loopback addresses. A service hosted in
 # a shared svchost is named svchost:<service>. Anything else that listens is a
