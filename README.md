@@ -109,7 +109,7 @@ What it checks on Windows, where it differs:
 
 | Area | Check | It is a problem when |
 |---|---|---|
-| Network | Route | the route Windows uses for an internet address does not go through a tunnel adapter (`TUNNEL_MATCH`) |
+| Network | Route | the route Windows uses for an internet address goes neither through a known tunnel adapter (`TUNNEL_MATCH`) nor through a built-in Windows VPN that Windows reports as connected |
 | | Network profile | it is Private while a VPN is expected, so other machines on the network see this PC (a warning) |
 | Open ports | Listeners | a process outside the allowlist listens on a non-loopback address and the firewall lets the network in; a warning while the firewall still blocks it |
 | Device | BitLocker | the system drive is not encrypted, or its protection is suspended |
@@ -141,6 +141,7 @@ A port number alone is a hint, not proof, so a port is named only when its proce
 Limits on Windows:
 
 - **The firewall verdict is worked out from the rules, not measured.** It covers ports, programs, services, block rules and network profiles. It skips the rules of Store apps and of Wi-Fi Direct, which allow everything but apply only inside their own app or adapter. It does not model IPsec, edge traversal or third-party firewalls. When it cannot tell, it errs towards "reachable".
+- **A tunnel is recognised, never guessed.** By the names of the VPNs' own adapters and drivers in `TUNNEL_MATCH`, or, for Windows' built-in VPN (IKEv2, SSTP, L2TP, PPTP), by Windows' own list of connected VPN connections; PPPoE broadband is PPP too and does not count. Nothing counts as a tunnel just because its name says "VPN". An adapter seccheck does not know reads as outside the tunnel, and the row tells you to add it to `TUNNEL_MATCH` if it is yours: the check errs towards an alarm, never towards calm.
 - **The DNS row shows the resolvers of the interface that carries the route.** Windows may still send a query out of every interface that has a resolver.
 - **Other users' processes have no path or command line without admin rights**, so firewall rules for a specific program count for them.
 - **No backup check yet.**

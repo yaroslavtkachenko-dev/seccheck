@@ -273,9 +273,17 @@ foreach ($a in 'NordLynx Tunnel', 'TAP-NordVPN Windows Adapter V9', 'TAP-Windows
   eq "a tunnel: $a" ($a -match $TUNNEL_MATCH) 'True'
 }
 foreach ($a in 'Realtek 8852BE Wireless LAN WiFi 6 PCI-E NIC', 'Realtek Gaming 2.5GbE Family Controller', 'Intel(R) Ethernet Connection I219-V',
-               'Hyper-V Virtual Ethernet Adapter') {
+               'Hyper-V Virtual Ethernet Adapter', 'Teredo Tunneling Pseudo-Interface', 'Microsoft IP-HTTPS Platform Adapter',
+               'WAN Miniport (PPPOE)') {
   eq "not a tunnel: $a" ($a -match $TUNNEL_MATCH) 'False'
 }
+# a name that only sounds like a VPN is not proof of one
+eq 'an adapter merely called VPN is not trusted' (Test-Tunnel 'Corp VPN Adapter' 'Corp VPN' 'Ethernet' @()) 'False'
+
+eq 'a connected built-in VPN is a tunnel' (Test-Tunnel 'Work' 'Work' 'Ppp' @('Work')) 'True'
+eq 'a built-in VPN that is not connected is not' (Test-Tunnel 'Work' 'Work' 'Ppp' @()) 'False'
+eq 'PPPoE broadband is PPP but not a VPN' (Test-Tunnel 'Kyivstar' 'Kyivstar' 'Ppp' @('Work')) 'False'
+eq 'only a PPP link can be a built-in VPN' (Test-Tunnel 'Work' 'Work' 'Ethernet' @('Work')) 'False'
 
 $ol = [pscustomobject]@{ Name = 'ollama'; Path = $null; Services = @(); Cmd = 'ollama serve' }
 eq 'Ollama on its port is a model server' (Get-PortEntry 11434 $ol).Class 'ai'

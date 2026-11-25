@@ -42,6 +42,10 @@ $VPN_ORG_MATCH = ''              # regex: who should own the exit IP
 # tunnel interface prefix like macOS's utun. TAP- and not TAP-Windows: VPN
 # apps ship their own copy of the driver under their own name (TAP-NordVPN,
 # TAP-ProtonVPN), and the adapter's name is often just "Local Area Connection".
+# Only names of the VPNs' own adapters and drivers belong here, never a word
+# like "VPN": an adapter seccheck does not know reads as outside the tunnel,
+# so the check errs towards an alarm, never towards calm. Tried live: NordVPN
+# over NordLynx and over OpenVPN (the DCO adapter).
 $TUNNEL_MATCH = 'WireGuard|Wintun|TAP-|OpenVPN|Tailscale|ZeroTier|NordLynx|Mullvad|ProtonVPN|AnyConnect|Fortinet|PANGP|SonicWall|Cloudflare WARP'
 # Process names, or svchost:<service> for services that share a svchost.
 $ALLOWED_LISTENERS = @('System', 'lsass', 'wininit', 'services', 'spoolsv',
@@ -126,6 +130,7 @@ if ($UI -eq 'uk') { $T = @{
   p_rpc        = 'системні RPC, портів: %s — фаєрвол блокує вхідні'
   d_pid        = 'PID %s'
   d_pid_age    = 'PID %s · слухає %s'
+  d_tunnel_hint = 'якщо «%s» — твій VPN, допиши назву його адаптера в TUNNEL_MATCH (seccheck --init-config)'
   d_cmd        = 'команда: %s'
   d_risk       = 'ризик: %s'
   d_fix        = 'закрити: %s'
@@ -263,6 +268,7 @@ if ($UI -eq 'uk') { $T = @{
   p_rpc        = 'system RPC, %s ports — the firewall blocks inbound'
   d_pid        = 'PID %s'
   d_pid_age    = 'PID %s · listening for %s'
+  d_tunnel_hint = "if '%s' is your VPN, add its adapter's name to TUNNEL_MATCH (seccheck --init-config)"
   d_cmd        = 'command: %s'
   d_risk       = 'risk: %s'
   d_fix        = 'fix: %s'
@@ -669,6 +675,18 @@ function Get-Reach($fw, [int]$port, $proc) {  # open | lan | blocked
 # the firewall drops them they are part of the OS, not a finding, allowlisted or
 # not; one row says so. A reachable one is judged like any other listener.
 $SYS_RPC = 'lsass', 'wininit', 'services', 'spoolsv', 'svchost'
+
+# Windows' built-in VPN (IKEv2, SSTP, L2TP, PPTP) has no adapter with a telling
+# name: its link is a PPP interface named after the connection. PPPoE broadband
+# is PPP as well, so a PPP link is a tunnel only when Windows itself lists it as
+# a connected VPN connection. Nothing here is inferred from a name that merely
+# sounds like a VPN: a wrong "inside the tunnel" is the one answer this check
+# must never give.
+function Test-Tunnel([string]$text, [string]$alias, [string]$type, [string[]]$vpnUp) {
+  if ($text -match $TUNNEL_MATCH) { return $true }
+  [bool]($type -eq 'Ppp' -and $alias -and $vpnUp -contains $alias)
+}
+
 function Test-SystemRpc([int]$port, [string]$name, [string]$reach) {
   $port -ge 49152 -and $name -in $SYS_RPC -and $reach -eq 'blocked'
 }
@@ -874,10 +892,27 @@ Head h_net
 function Route-For([string]$ip) {
   try { $r = @(Find-NetRoute -RemoteIPAddress $ip -ErrorAction Stop); $r[-1] } catch { $null }
 }
+function Get-IfType([int]$ifIndex) {  # Ppp, Ethernet, Wireless80211…; .NET sees PPP links, Get-NetAdapter does not
+  foreach ($n in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+    $p = $n.GetIPProperties()
+    foreach ($get in 'GetIPv4Properties', 'GetIPv6Properties') {
+      try { if ($p.$get().Index -eq $ifIndex) { return [string]$n.NetworkInterfaceType } } catch {}
+    }
+  }
+  ''
+}
+$VPN_UP = $null   # connected built-in VPN connections, asked for only when a PPP link carries traffic
 function Is-Tunnel([int]$ifIndex) {
   $a = Get-NetAdapter -InterfaceIndex $ifIndex -IncludeHidden -ErrorAction SilentlyContinue
-  $text = if ($a) { "$($a.Name) $($a.InterfaceDescription)" } else { [string](Get-NetIPInterface -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue | Select-Object -First 1).InterfaceAlias }
-  [bool]($text -match $TUNNEL_MATCH)
+  $alias = [string](Get-NetIPInterface -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue | Select-Object -First 1).InterfaceAlias
+  $text = if ($a) { "$($a.Name) $($a.InterfaceDescription)" } else { $alias }
+  if ($text -match $TUNNEL_MATCH) { return $true }
+  $type = Get-IfType $ifIndex
+  if ($type -eq 'Ppp' -and $null -eq $script:VPN_UP) {
+    $script:VPN_UP = @(@(Get-VpnConnection -ErrorAction SilentlyContinue) + @(Get-VpnConnection -AllUserConnection -ErrorAction SilentlyContinue) |
+      Where-Object { $_ -and $_.ConnectionStatus -eq 'Connected' } | ForEach-Object { [string]$_.Name })
+  }
+  Test-Tunnel $text $alias $type $script:VPN_UP
 }
 
 $R4 = Route-For '1.1.1.1'
@@ -887,7 +922,15 @@ if (-not $R4) {
 } else {
   $ROUTE_TUN = Is-Tunnel $R4.InterfaceIndex
   if ($ROUTE_TUN) { Chk ok $T.l_route - route_tun $R4.InterfaceAlias }
-  elseif ($VPN_EXPECTED) { Chk bad $T.l_route route:bypass route_out $R4.InterfaceAlias }
+  elseif ($VPN_EXPECTED) {
+    # A virtual adapter seccheck does not know stays an alarm: it may be the
+    # VPN, but a name is not proof. The row says how to teach it the adapter.
+    $hint = @()
+    if (-not (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $R4.InterfaceIndex })) {
+      $hint = @(Fmt d_tunnel_hint $R4.InterfaceAlias)
+    }
+    Row bad $T.l_route (Fmt route_out $R4.InterfaceAlias) route:bypass $hint
+  }
   else { Chk ok $T.l_route - route_plain $R4.InterfaceAlias }
 }
 
